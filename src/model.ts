@@ -34,10 +34,10 @@ const JUMP_SPEC = /^[A-Za-z0-9._@:,-]+$/u
 const OPTION_KEY = /^[A-Za-z0-9]{2,64}$/u
 /** Charset for every field that ends up inside a saved jump host's `ProxyCommand`. */
 const PROXY_SAFE = /^[A-Za-z0-9._/@:+-]+$/u
-/** Path charset: no quote, backslash, double quote, `%` (an ssh token prefix), whitespace or control char. */
-const SAFE_PATH = /^[^'\\"%\s\x00-\x1f\x7f]+$/u
+/** Path charset: no quote, backslash, double quote, `%` (an ssh token prefix), shell metacharacter, whitespace or control char. */
+const SAFE_PATH = /^[^'\\"%\s;$`|&<>(){}*?!#\x00-\x1f\x7f]+$/u
 /** Socket path charset: as {@link SAFE_PATH} but a plain space is allowed. */
-const SOCKET_PATH = /^[^'\\"%\x00-\x1f\x7f]+$/u
+const SOCKET_PATH = /^[^'\\"%;$`|&<>(){}*?!#\x00-\x1f\x7f]+$/u
 
 /** ssh option keys (lowercased) that run local code, load a library or name a program. */
 const CODE_RUNNING_KEYS = [
@@ -169,11 +169,11 @@ function checkPath(errors: FieldError[], path: string, value: string | undefined
         : 'must start with ~/'))
       return
     }
-    if (!SAFE_PATH.test(value)) errors.push(err(path, "must not contain quotes, backslashes, '%', whitespace or control characters"))
+    if (!SAFE_PATH.test(value)) errors.push(err(path, "must not contain quotes, backslashes, '%', shell metacharacters (; $ ` | & < > ( ) { } * ? ! #), whitespace or control characters"))
     return
   }
   if (!value.startsWith('~/') && !value.startsWith('/')) { errors.push(err(path, 'must start with ~/ or /')); return }
-  if (!SOCKET_PATH.test(value)) errors.push(err(path, "must not contain quotes, backslashes, '%' or control characters"))
+  if (!SOCKET_PATH.test(value)) errors.push(err(path, "must not contain quotes, backslashes, '%', shell metacharacters (; $ ` | & < > ( ) { } * ? ! #) or control characters"))
 }
 
 function validateForward(errors: FieldError[], index: number, forward: Forward): void {
@@ -230,7 +230,7 @@ function validateJump(errors: FieldError[], host: Host, jump: Jump, context: Val
   const bad = proxyUnsafeFields(target, context.home)
   if (bad.length > 0) {
     errors.push(err('jump.host',
-      `the saved jump host's ${bad.join(', ')} contain characters that cannot be passed through a ProxyCommand; use a free-text jump spec plus ~/.ssh/config`))
+      `the saved jump host has characters in ${bad.join(', ')} that cannot be passed through a ProxyCommand; use a free-text jump spec plus ~/.ssh/config`))
   }
 }
 
