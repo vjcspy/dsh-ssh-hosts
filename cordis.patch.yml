@@ -1,0 +1,25 @@
+# Bundle patch for dsh-ssh-hosts.
+#
+# The DSH profile applies every installed bundle's patch on top of the profile
+# tree, so this file is the whole installation contract: one `insert` row keyed
+# by the package id.
+#
+# `hostsFile` ships a neutral per-user default and NO absolute path or
+# deployment location: a public plugin must not default into a git-tracked
+# tree. A deployment that keeps the list in a git checkout overrides it in its
+# own profile patch (an id-keyed row; `config` is assigned shallowly, so the
+# row states the complete object):
+#
+#   - id: dsh-ssh-hosts
+#     name: dsh-ssh-hosts
+#     config:
+#       hostsFile: ~/path/to/checkout/hosts.yaml
+#       probeTimeoutMs: 2000
+#       probeConcurrency: 8
+- insert:
+    - id: dsh-ssh-hosts
+      name: dsh-ssh-hosts
+      config:
+        hostsFile: '~/.config/dsh-ssh-hosts/hosts.yaml'
+        probeTimeoutMs: 2000
+        probeConcurrency: 8
