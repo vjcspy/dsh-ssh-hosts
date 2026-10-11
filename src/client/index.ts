@@ -6,8 +6,9 @@
  * `sidebarRight`. They are read through a scoped `ctx.inject` so their absence
  * only disables Connect: the tab, the editor and the list still work.
  *
- * `keepMounted` stays `false`: the body holds no expensive resource, and a
- * remount re-reads the file.
+ * `keepMounted` is `true`: Connect focuses the new core terminal tab, which would
+ * otherwise unmount this body mid-transaction and roll the terminal back before
+ * its adoption is proven. A hidden tab pauses its polling.
  *
  * @module dsh-ssh-hosts/client
  */
@@ -52,6 +53,9 @@ interface RemoteTerminalLike {
 /** The slice of the sidebar service this half calls. */
 interface SidebarLike {
   openTabIn(sessionId: string, kind: string, options: { params: { terminalId: string } }): void
+  closeIn(sessionId: string, tabId: string): void
+  tabsIn(sessionId: string): readonly { id: string; kind: string }[]
+  readonly tabDomain: { occurrence(sessionId: string, tab: { id: string }): { navigation: { getSnapshot(): { params?: { terminalId?: string } | undefined } } } }
   readonly mounted: { getSnapshot(): string | undefined; subscribe(fn: () => void): () => void }
 }
 
@@ -79,7 +83,12 @@ function portOf(remote: RemoteTerminalLike): TerminalPort {
     write: async (sid, id, attachmentId, data) => { valueOf(await remote.write(sid, id, attachmentId, data)) },
     rename: async (sid, id, title) => { valueOf(await remote.rename(sid, id, title)) },
     list: async sid => valueOf(await remote.list(sid)),
-    close: async (sid, id) => { valueOf(await remote.close(sid, id)) },
+    close: async (sid, id) => {
+      const result = await remote.close(sid, id)
+      // Already gone (the core close handler won the race): the goal is met.
+      if (!result.ok && (result.error as { code?: string } | undefined)?.code === 'terminal/unavailable') return
+      valueOf(result)
+    },
   }
 }
 
@@ -99,7 +108,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id: PLUGIN_ID,
     kind: TAB_KIND,
-    keepMounted: false,
+    keepMounted: true,
     title: () => t('tab.title'),
     guide: [{
       id: GUIDE_ENTRY_ID,
@@ -117,12 +126,14 @@ export function apply(ctx: ClientContext): void {
     services = next
     for (const fn of listeners) fn()
   }
-  const scoped = (ctx as unknown as { inject: (names: string[], cb: (c: unknown) => (() => void) | void) => () => void }).inject
-  ctx.effect(() => scoped.call(ctx, ['remote.terminal', 'sidebarRight'], (inner) => {
-    const c = inner as { remote: { terminal: RemoteTerminalLike }; sidebarRight: SidebarLike }
+  // `remote` must be listed with `remote.terminal`: the dotted name alone never resolves (same pair the core terminal plugin declares).
+  // The scoped fiber is owned by `ctx`: it unloads with the plugin and re-runs when either service changes.
+  const bind = ctx as unknown as { inject: (names: string[], cb: (c: unknown) => void) => unknown }
+  bind.inject(['remote', 'remote.terminal', 'sidebarRight'], (inner) => {
+    const c = inner as ClientContext & { remote: { terminal: RemoteTerminalLike }; sidebarRight: SidebarLike }
     setServices({ remote: c.remote.terminal, sidebar: c.sidebarRight })
-    return () => { setServices(undefined) }
-  }), 'dsh-ssh-hosts: terminal services')
+    c.effect(() => () => { setServices(undefined) }, 'dsh-ssh-hosts: terminal services')
+  })
 
   const available = {
     getSnapshot: (): boolean => services !== undefined,
@@ -140,6 +151,14 @@ export function apply(ctx: ClientContext): void {
         launch: (id, s) => api.launch(id, s),
         terminal: port,
         openTab: (sid, terminalId) => { live.sidebar.openTabIn(sid, 'terminal', { params: { terminalId } }) },
+        closeTab: (sid, terminalId) => {
+          try {
+            for (const tab of live.sidebar.tabsIn(sid)) {
+              if (tab.kind !== 'terminal') continue
+              if (live.sidebar.tabDomain.occurrence(sid, { id: tab.id }).navigation.getSnapshot().params?.terminalId === terminalId) live.sidebar.closeIn(sid, tab.id)
+            }
+          } catch { /* best effort */ }
+        },
         sleep,
         now: () => Date.now(),
         recordRecent,
