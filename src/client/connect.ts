@@ -51,6 +51,8 @@ export interface ConnectDeps {
   readonly terminal: TerminalPort
   /** `sidebarRight.openTabIn(sessionId, 'terminal', { params: { terminalId } })`; returns void and may silently do nothing. */
   openTab(sessionId: string, terminalId: string): void
+  /** Close the core `terminal` tab bound to `terminalId`, if one exists; used only by rollback. Must not throw. */
+  closeTab(sessionId: string, terminalId: string): void
   /** An abortable timer: resolves after `ms`, rejects with the signal's reason on abort. */
   sleep(ms: number, signal: AbortSignal): Promise<void>
   now(): number
@@ -112,6 +114,7 @@ export async function connect(
 
   let terminalId: string | undefined
   let armed = false
+  let tabOpened = false
   let followCtl: AbortController | undefined
   let loop: Promise<void> | undefined
 
@@ -125,6 +128,10 @@ export async function connect(
   const rollback = async (): Promise<string | undefined> => {
     if (terminalId === undefined) return undefined
     const id = terminalId
+    // A tab opened before the abort would otherwise be left pointing at a closed terminal.
+    if (tabOpened) {
+      try { deps.closeTab(sessionId, id) } catch { /* best effort: the terminal close below still runs */ }
+    }
     try {
       await releaseFollower()
       const guard = new AbortController()
@@ -197,6 +204,7 @@ export async function connect(
     await loop
     assertLive()
 
+    tabOpened = true
     deps.openTab(sessionId, id)
 
     const deadline = deps.now() + timings.adoptMs
