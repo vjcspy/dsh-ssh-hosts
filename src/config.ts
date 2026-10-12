@@ -27,11 +27,14 @@ export const API_PREFIX = '/api/dsh-ssh-hosts'
 /** Bundle-default hosts file; a deployment overrides it in its own profile patch. */
 export const DEFAULT_HOSTS_FILE = '~/.config/dsh-ssh-hosts/hosts.yaml'
 
-/** Default TCP probe deadline in milliseconds. */
+/** Default TCP probe deadline in milliseconds; also the pre-flight `ssh-keyscan` deadline. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 2000
 
 /** Default number of concurrent TCP probes. */
 export const DEFAULT_PROBE_CONCURRENCY = 8
+
+/** Default for the Connect pre-flight: remove a `known_hosts` entry whose key the host no longer serves. */
+export const DEFAULT_HEAL_CHANGED_HOST_KEY = true
 
 /** Client list poll interval while the tab is visible, in milliseconds. */
 export const LIST_POLL_MS = 5000

@@ -8,9 +8,11 @@
  * `Allow`; other verbs never reach a handler (the channel supports only GET,
  * HEAD and POST for exact routes).
  *
- * The routes never spawn a process and never touch a terminal. The ssh line is
- * built here, behind one validator, and the browser only types what `launch`
- * returned.
+ * No route touches a terminal, and the only process any of them runs is the
+ * Connect pre-flight's `ssh-keyscan` (`./hostkey.ts`) — opt-in per request,
+ * never for a preview or a copy, and only ever deleting a `known_hosts` line.
+ * The ssh line is built here, behind one validator, and the browser only types
+ * what `launch` returned.
  */
 import { homedir } from 'node:os'
 
@@ -19,9 +21,10 @@ import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 
 import { CHANNEL_METHODS, ROUTES, type RouteSpec } from '../config.ts'
 import { parseDoc, validateDocument } from '../model.ts'
-import type { ApiErrorBody, FieldError, Host, LaunchResult, ListResult, PreviewResult } from '../types.ts'
+import type { ApiErrorBody, FieldError, Host, HostKeyReport, LaunchResult, ListResult, PreviewResult } from '../types.ts'
 import { buildLaunch } from './command.ts'
 import { diagnose } from './diagnostics.ts'
+import { checkHostKey } from './hostkey.ts'
 import { listIdentities } from './identities.ts'
 import { probeHosts } from './probe.ts'
 import { HostsStore, RevisionConflictError } from './store.ts'
@@ -31,6 +34,8 @@ export interface RouteOptions {
   readonly hostsFile: string
   readonly probeTimeoutMs: number
   readonly probeConcurrency: number
+  /** Whether Connect may delete a stale `known_hosts` entry before it types the ssh line. */
+  readonly healChangedHostKey: boolean
   /** Home directory; injectable for the artifact checks. */
   readonly home?: string
 }
@@ -62,7 +67,7 @@ async function jsonBody(request: Request): Promise<Record<string, unknown> | Res
 
 /**
  * Build the handlers of every route.
- * @param options - hosts file and probe settings.
+ * @param options - hosts file, probe settings and the host-key policy.
  * @returns a handler per route key.
  */
 export function createHandlers(options: RouteOptions): Record<RouteSpec['key'], (request: Request) => Promise<Response>> {
@@ -126,9 +131,18 @@ export function createHandlers(options: RouteOptions): Record<RouteSpec['key'], 
     if (read.doc === null) return fail(422, { code: 'parse-error', message: read.parseError ?? 'the hosts file cannot be parsed' })
     const host = read.doc.hosts.find(h => h.id === id)
     if (host === undefined) return fail(404, { code: 'not-found', message: 'no such host' })
-    const built = buildLaunch(host, read.doc.hosts, read.doc.groups, home)
+    // Opt-in: `Copy command` and the editor preview call this route too, and a
+    // preview must never touch `known_hosts`.
+    const heal = body['heal'] === true
+    let hostKey: HostKeyReport = { status: 'disabled', reason: 'not requested' }
+    if (heal) {
+      hostKey = options.healChangedHostKey
+        ? await checkHostKey(host, { home, timeoutMs: options.probeTimeoutMs })
+        : { status: 'disabled', reason: 'healChangedHostKey is false' }
+    }
+    const built = buildLaunch(host, read.doc.hosts, read.doc.groups, home, { healHostKey: hostKey.status === 'changed' })
     if (!built.ok) return fail(422, { code: 'invalid', message: 'the host has invalid fields', errors: built.errors })
-    return ok({ line: built.line, title: built.title } satisfies LaunchResult)
+    return ok({ line: built.line, title: built.title, hostKey } satisfies LaunchResult)
   }
 
   const probe = async (request: Request): Promise<Response> => {
@@ -149,7 +163,7 @@ export function createHandlers(options: RouteOptions): Record<RouteSpec['key'], 
 /**
  * Register every route, owned by this context.
  * @param ctx - Host context owning the `connection` service.
- * @param options - hosts file and probe settings.
+ * @param options - hosts file, probe settings and the host-key policy.
  */
 export function registerRoutes(ctx: Context, options: RouteOptions): void {
   const handlers = createHandlers(options)

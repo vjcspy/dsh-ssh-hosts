@@ -86,6 +86,37 @@ export interface HostDiagnostics {
   jumpMissing?: boolean
 }
 
+/**
+ * How the pre-flight host-key check ended.
+ *
+ * `disabled` — the caller did not ask for it, or the deployment turned it off.
+ * `skipped` — the destination cannot be checked this way (alias, jump host,
+ * `StrictHostKeyChecking=no`); `reason` says which.
+ * `no-entry` — nothing is recorded for the destination, so there is nothing to
+ * heal and no scan was run.
+ * `ok` — the recorded key is the key the host serves.
+ * `unreachable` — the host could not be asked; nothing was touched.
+ * `changed` — the recorded key is stale and its lines were removed.
+ */
+export type HostKeyStatus = 'disabled' | 'skipped' | 'no-entry' | 'ok' | 'unreachable' | 'changed'
+
+/** Result of the pre-flight host-key check that `hosts/launch` runs when asked to heal. */
+export interface HostKeyReport {
+  status: HostKeyStatus
+  /** `host`, or `[host]:port` off 22 — the token `known_hosts` keys the entry by. */
+  dest?: string | undefined
+  /** The `known_hosts` file the stale lines were removed from. */
+  file?: string | undefined
+  /** How many `known_hosts` lines were removed. */
+  removed?: number | undefined
+  /** `SHA256:` fingerprints of the entries that were stored. */
+  stored?: string[] | undefined
+  /** `SHA256:` fingerprints of the keys the host serves now. */
+  live?: string[] | undefined
+  /** Why the check did not run. */
+  reason?: string | undefined
+}
+
 /** Response of `hosts/list`. */
 export interface ListResult {
   path: string
@@ -107,6 +138,8 @@ export interface ProbeResult {
 export interface LaunchResult {
   line: string
   title: string
+  /** Present when the caller asked for the pre-flight host-key check. */
+  hostKey?: HostKeyReport | undefined
 }
 
 /** Response of `hosts/preview`. */

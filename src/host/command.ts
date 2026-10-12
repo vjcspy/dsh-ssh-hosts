@@ -15,6 +15,17 @@
 import { expandHome, validateHost } from '../model.ts'
 import type { FieldError, Host } from '../types.ts'
 
+/** Options that change one launch without changing the host. */
+export interface BuildOptions {
+  /**
+   * The pre-flight check removed a stale `known_hosts` entry, so this one
+   * connection must be allowed to record the key the host serves now. ssh uses
+   * the FIRST obtained value, so this overrides both the host's own
+   * `-o StrictHostKeyChecking=…` and the user's `~/.ssh/config`.
+   */
+  readonly healHostKey?: boolean
+}
+
 /** A successfully built launch. */
 export interface BuiltLaunch {
   readonly ok: true
@@ -79,6 +90,7 @@ function proxyCommand(jump: Host, home: string): string {
  * @param all - every saved host, for the jump reference.
  * @param groups - every saved group, for validation.
  * @param home - the home directory for `~` expansion.
+ * @param options - per-launch options; `healHostKey` records a healed host key.
  * @returns the argv, the shell line and the title, or the validation errors.
  */
 export function buildLaunch(
@@ -86,11 +98,16 @@ export function buildLaunch(
   all: readonly Host[],
   groups: readonly { id: string; name: string }[],
   home: string,
+  options: BuildOptions = {},
 ): BuiltLaunch | RefusedLaunch {
   const errors = validateHost(host, { hosts: all, groups, home })
   if (errors.length > 0) return { ok: false, errors }
 
   const argv: string[] = ['ssh']
+  // After a heal the recorded entry is gone, so the host is unknown to ssh; this
+  // lets ssh record the key it negotiates instead of failing under
+  // `StrictHostKeyChecking=yes`. Emitted first so it wins over any later `-o`.
+  if (options.healHostKey === true) argv.push('-o', 'StrictHostKeyChecking=accept-new')
   const remote = host.remoteCommand ?? undefined
   if (remote !== undefined) argv.push('-t')
   argv.push(...authFlags(host, home), ...portFlags(host))
