@@ -21,6 +21,7 @@
  * arrives through {@link ConnectDeps}, so a script can drive it with stubs.
  */
 import { TERMINAL_ID_PREFIX } from '../config.ts'
+import type { HostKeyReport, LaunchResult } from '../types.ts'
 
 /** A frame of the terminal follow stream, as far as this module reads it. */
 export interface FrameLike {
@@ -46,8 +47,8 @@ export interface TerminalPort {
 
 /** Everything impure the transaction needs. */
 export interface ConnectDeps {
-  /** `POST hosts/launch`. */
-  launch(hostId: string, signal: AbortSignal): Promise<{ line: string; title: string }>
+  /** `POST hosts/launch`, asking the Host half for the pre-flight host-key check. */
+  launch(hostId: string, signal: AbortSignal): Promise<LaunchResult>
   readonly terminal: TerminalPort
   /** `sidebarRight.openTabIn(sessionId, 'terminal', { params: { terminalId } })`; returns void and may silently do nothing. */
   openTab(sessionId: string, terminalId: string): void
@@ -79,7 +80,12 @@ const DEFAULT_TIMINGS: ConnectTimings = { readyMs: 3000, adoptMs: 5000, pollMs: 
 
 /** How a transaction ended. */
 export type ConnectOutcome =
-  | { readonly status: 'connected'; readonly terminalId: string }
+  | {
+    readonly status: 'connected'
+    readonly terminalId: string
+    /** Present when the pre-flight check healed a changed host key. */
+    readonly hostKey?: HostKeyReport | undefined
+  }
   | { readonly status: 'aborted'; readonly terminalId?: string; readonly cleanupError?: string }
   | { readonly status: 'failed'; readonly message: string; readonly terminalId?: string; readonly cleanupError?: string }
 
@@ -221,7 +227,11 @@ export async function connect(
     assertLive()
     armed = false
     deps.recordRecent(hostId, deps.now())
-    return { status: 'connected', terminalId: id }
+    return {
+      status: 'connected',
+      terminalId: id,
+      ...(launch.hostKey === undefined ? {} : { hostKey: launch.hostKey }),
+    }
   } catch (error) {
     const aborted = opSignal.aborted
     const cleanupError = armed ? await rollback() : undefined

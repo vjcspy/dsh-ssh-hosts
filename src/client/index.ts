@@ -148,7 +148,7 @@ export function apply(ctx: ClientContext): void {
       if (live === undefined) return undefined
       const port = portOf(live.remote)
       return (sessionId: string, hostId: string, signal: AbortSignal): Promise<ConnectOutcome> => connect({
-        launch: (id, s) => api.launch(id, s),
+        launch: (id, s) => api.launch(id, true, s),
         terminal: port,
         openTab: (sid, terminalId) => { live.sidebar.openTabIn(sid, 'terminal', { params: { terminalId } }) },
         closeTab: (sid, terminalId) => {

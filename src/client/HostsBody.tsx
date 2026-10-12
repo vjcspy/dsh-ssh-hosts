@@ -173,8 +173,13 @@ export function HostsBody({ face: readFace, useTabInfo, sessionId, t }: HostsBod
     setConnecting(new Set(controllers.current.keys()))
     try {
       const outcome = await face.connect(sessionId, host.id, controller.signal)
-      if (outcome.status === 'connected') setRecents(readStored<Recent[]>(RECENT_STORAGE_KEY, []))
-      else if (outcome.status === 'failed') {
+      if (outcome.status === 'connected') {
+        setRecents(readStored<Recent[]>(RECENT_STORAGE_KEY, []))
+        // A heal deleted a line from known_hosts: never silent.
+        if (outcome.hostKey?.status === 'changed') {
+          say(t('toast.hostKeyChanged', { dest: outcome.hostKey.dest ?? host.host ?? '', removed: String(outcome.hostKey.removed ?? 0) }))
+        }
+      } else if (outcome.status === 'failed') {
         say(t('toast.connectFailed', { error: outcome.cleanupError === undefined ? outcome.message : `${outcome.message}; ${outcome.cleanupError}` }))
       } else if (outcome.cleanupError !== undefined) say(outcome.cleanupError)
     } finally {

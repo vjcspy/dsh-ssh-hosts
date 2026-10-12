@@ -61,7 +61,14 @@ export const api = {
   list: (signal?: AbortSignal): Promise<ListResult> => call('list', undefined, signal),
   save: (doc: HostsDoc, revision: string): Promise<{ revision: string }> => call('save', { doc, revision }),
   preview: (draft: Host, revision: string, signal?: AbortSignal): Promise<PreviewResult> => call('preview', { draft, revision }, signal),
-  launch: (id: string, signal?: AbortSignal): Promise<LaunchResult> => call('launch', { id }, signal),
+  /**
+   * Build the launch line.
+   *
+   * `heal` asks the Host half to run the pre-flight host-key check, which may
+   * delete a stale `known_hosts` entry — so only Connect sets it. The editor
+   * preview and the Copy command leave it out and never touch `known_hosts`.
+   */
+  launch: (id: string, heal = false, signal?: AbortSignal): Promise<LaunchResult> => call('launch', { id, heal }, signal),
   probe: (ids: string[], signal?: AbortSignal): Promise<ProbeResult[]> => call('probe', { ids }, signal),
   identities: (): Promise<string[]> => call('identities'),
 }

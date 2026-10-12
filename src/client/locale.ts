@@ -57,7 +57,7 @@ export const en = {
 
   'empty.title': 'No SSH hosts yet',
   'empty.body': 'Add a host, then click it to open a terminal tab running ssh. SSH tabs belong to the current conversation and end with it or with a host restart.',
-  'empty.policy': 'This tab never runs ssh or reads secrets on its own: it only checks that key files exist and tests TCP reachability.',
+  'empty.policy': 'This tab never runs ssh on its own and reads no secrets: it checks that key files exist, tests TCP reachability, and — for a host already in known_hosts — asks the host for its key (ssh-keyscan) so a changed host key is dropped instead of failing the connection.',
   'empty.add': 'Add host',
   'empty.noMatch': 'No host matches "{query}".',
   'footnote.hostsFile': 'Hosts file: {path}',
@@ -68,6 +68,7 @@ export const en = {
   'toast.saved': 'Saved',
   'toast.copied': 'Command copied',
   'toast.connectFailed': 'Connect failed: {error}',
+  'toast.hostKeyChanged': 'Host key changed for {dest}: removed {removed} stale known_hosts line(s); ssh will record the new key.',
   'toast.noTerminal': 'The terminal service is not available in this Session.',
   'toast.saveFailed': 'Save failed: {error}',
   'toast.dismiss': 'Dismiss',
