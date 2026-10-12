@@ -16,6 +16,7 @@
 #       hostsFile: ~/path/to/checkout/hosts.yaml
 #       probeTimeoutMs: 2000
 #       probeConcurrency: 8
+#       healChangedHostKey: true
 - insert:
     - id: dsh-ssh-hosts
       name: dsh-ssh-hosts
@@ -23,3 +24,4 @@
         hostsFile: '~/.config/dsh-ssh-hosts/hosts.yaml'
         probeTimeoutMs: 2000
         probeConcurrency: 8
+        healChangedHostKey: true

@@ -4,8 +4,9 @@ A Termius-like SSH host manager for the DSH right sidebar, shipped as a Cordis p
 
 Hosts live in one YAML file, are edited in a drawer with a live command preview, and
 connect through the core terminal: the plugin types `exec ssh ...` into a fresh terminal
-and hands it to the regular `terminal` tab. There is no core change and the plugin never
-spawns a process itself.
+and hands it to the regular `terminal` tab. There is no core change. The only process the
+plugin runs itself is `ssh-keyscan`, in the Connect pre-flight described under
+[Trust policy](#trust-policy).
 
 ## Install
 
@@ -17,8 +18,9 @@ default row). Build it first (`pnpm run build`), then install it from the built 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `hostsFile` | `~/.config/dsh-ssh-hosts/hosts.yaml` | The only store. Created on the first save. |
-| `probeTimeoutMs` | `2000` | TCP reachability probe deadline. |
+| `probeTimeoutMs` | `2000` | TCP reachability probe deadline, and the host-key scan deadline. |
 | `probeConcurrency` | `8` | Concurrent probes. |
+| `healChangedHostKey` | `true` | Delete a stale `known_hosts` entry for the destination before Connect, when the host's key changed. |
 
 Override the row in your own profile patch, keyed by the plugin id.
 
@@ -42,12 +44,33 @@ single-quoted for the local shell, `--` always precedes the destination, and the
 `SecurityKeyProvider`, `XAuthLocation`, `Match`, `Include`) and any key that duplicates a
 structured field. Diagnostics read files only; `ssh -G` is never run at runtime.
 
+**One process is the exception, and only for Connect.** Before the ssh line is typed, the
+Host half may run
+
+```
+ssh-keyscan -p <port> -T <probeTimeoutMs> -t rsa,ecdsa,ed25519 -- <host>
+```
+
+to ask the destination for its public keys. It speaks the SSH handshake, authenticates
+nothing, and runs no local command. The scan runs **only** when the destination already has
+an entry in `~/.ssh/known_hosts`, and its only effect is to delete that entry when the key
+the host serves differs from the key recorded for it — the case of a machine rebuilt behind
+the same address, where ssh otherwise aborts with `REMOTE HOST IDENTIFICATION HAS CHANGED`.
+The removed lines are copied to `<file>.old` first, and the connection that follows carries
+`-o StrictHostKeyChecking=accept-new`, so **ssh itself** records the key it negotiated: the
+plugin never writes key material. A first connect — nothing recorded — is untouched. Set
+`healChangedHostKey: false` to remove the exception entirely.
+
 ## Caveats
 
 - Hosts are per machine: the file is read where the DSH host runs, so key paths and
   agent sockets resolve there. The terminal is assumed to run on that same machine.
 - The Connect action opens the terminal in the Session that is on screen. Leaving the
   Session while a connect is in flight rolls the new terminal back.
+- A changed host key is healed only for a plain destination: an `alias` and a jump host
+  (whose real address and port live in `~/.ssh/config`) are skipped, and the file read is
+  the default `~/.ssh/known_hosts` / `known_hosts2` or the one the host entry's own
+  `UserKnownHostsFile` names — not a global one set in `~/.ssh/config`.
 - Recent connections are kept per browser, not in the hosts file.
 
 ## Scripts
