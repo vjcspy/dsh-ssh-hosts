@@ -1,14 +1,18 @@
 /**
  * Browser half: register the SSH tab kind, its keyed body, its copy and its
- * stylesheet, and bind the one impure edge (the core terminal) behind a face.
+ * stylesheet, and bind the impure edges (the core terminal, the Session terminal
+ * inventory and the right sidebar) behind one face.
  *
- * Connect needs two services this plugin does not own, `remote.terminal` and
- * `sidebarRight`. They are read through a scoped `ctx.inject` so their absence
- * only disables Connect: the tab, the editor and the list still work.
+ * Connect needs three services this plugin does not own: `remote.terminal`,
+ * `webTerminals` and `sidebarRight`. They are read through one scoped
+ * `ctx.inject`, so their absence only disables Connect: the tab, the editor and
+ * the list still work. Every type below comes from the declaration-merged
+ * `ClientContext`, so a Host-side change to those namespaces fails `tsc` instead
+ * of surfacing at runtime (the `remote.follow` breakage of 2026-10-24).
  *
  * `keepMounted` is `true`: Connect focuses the new core terminal tab, which would
  * otherwise unmount this body mid-transaction and roll the terminal back before
- * its adoption is proven. A hidden tab pauses its polling.
+ * its handover is proven. A hidden tab pauses its polling.
  *
  * @module dsh-ssh-hosts/client
  */
@@ -21,13 +25,19 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 // Type-only: declares the `sessionId` session seat.
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
-// Type-only: declares the generated `remote.terminal` namespace.
+// Type-only: declares the generated `remote` namespace on the Client Context.
+import type {} from '@deepseek-ai/dsh-api-gateway/client'
+// Type-only: declares the generated `remote.terminal` namespace on the Client Context.
+import type {} from '@deepseek-ai/dsh-api-terminal-controller/remote'
+// Type-only: declares the `webTerminals` service and its Session terminal inventory.
 import type {} from '@deepseek-ai/dsh-api-terminal-controller/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { WebTerminalId } from '@deepseek-ai/dsh-api-terminal-controller/types'
 
 import { GUIDE_ENTRY_ID, GUIDE_ENTRY_ORDER, LOCALE_NAMESPACE, PLUGIN_ID, RECENT_STORAGE_KEY, TAB_KIND } from '../config.ts'
 import { api } from './api.ts'
 import { readStored, writeStored, randomToken } from './components/ui.ts'
-import { connect, type ConnectOutcome, type FrameLike, type TerminalInfoLike, type TerminalPort } from './connect.ts'
+import { connect, type ConnectOutcome, type TerminalPort } from './connect.ts'
 import { en } from './locale.ts'
 import { HostsBody, type HostsInjected } from './HostsBody.tsx'
 import { installStyles } from './styles.ts'
@@ -37,27 +47,33 @@ export type { HostsInjected, HostsBodyProps } from './HostsBody.tsx'
 /** Services this half always needs; all shell-provided. */
 export const inject = ['slots', 'locale', 'sidebarRightTabs']
 
+/** The generated terminal namespace, as the scoped Context exposes it. */
+type TerminalRemote = ClientContext['remote']['terminal']
+
+/** The Session terminal inventory service. */
+type TerminalInventoryService = ClientContext['webTerminals']
+
+/** The outward right-sidebar face. */
+type SidebarRight = ClientContext['sidebarRight']
+
+/**
+ * The `openTabIn` call Connect needs, with the `terminal` kind's navigation parameters.
+ *
+ * That parameter map is declared by `@deepseek-ai/dsh-client-ui-sidebar-terminal`, but the
+ * package's published `/client` declaration never references its own `face.d.ts`, so the
+ * augmentation never reaches this program and `SidebarRightTabParamsFor<'terminal'>` degrades
+ * to `undefined`. This signature restates only the one call shape used here; the method is
+ * still read off the real service, so renaming it still fails the type check.
+ */
+interface TerminalTabOpener {
+  (sessionId: SessionId, kind: 'terminal', options: { readonly params: { readonly terminalId: WebTerminalId } }): void
+}
+
+/** The `terminal` tab kind's navigation parameters, as that kind declares them. */
+type TerminalTabParams = { readonly terminalId: WebTerminalId } | { readonly shellPath: string } | undefined
+
 /** One `RemoteResult`-shaped value, as far as this half reads it. */
 interface ResultLike<T> { readonly ok: boolean; readonly value?: T; readonly error?: unknown }
-
-/** The slice of the generated terminal namespace this half calls; ids stay plain strings. */
-interface RemoteTerminalLike {
-  create(sid: string, request: { id: string; cols: number; rows: number }, signal: AbortSignal): Promise<ResultLike<unknown>>
-  follow(sid: string, id: string, attachmentId: string, signal: AbortSignal): AsyncIterable<FrameLike>
-  write(sid: string, id: string, attachmentId: string, data: string): Promise<ResultLike<unknown>>
-  rename(sid: string, id: string, title: string): Promise<ResultLike<unknown>>
-  list(sid: string): Promise<ResultLike<readonly TerminalInfoLike[]>>
-  close(sid: string, id: string): Promise<ResultLike<unknown>>
-}
-
-/** The slice of the sidebar service this half calls. */
-interface SidebarLike {
-  openTabIn(sessionId: string, kind: string, options: { params: { terminalId: string } }): void
-  closeIn(sessionId: string, tabId: string): void
-  tabsIn(sessionId: string): readonly { id: string; kind: string }[]
-  readonly tabDomain: { occurrence(sessionId: string, tab: { id: string }): { navigation: { getSnapshot(): { params?: { terminalId?: string } | undefined } } } }
-  readonly mounted: { getSnapshot(): string | undefined; subscribe(fn: () => void): () => void }
-}
 
 /** Unwrap a `RemoteResult`, throwing its error. */
 function valueOf<T>(result: ResultLike<T>): T {
@@ -76,20 +92,42 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /** Adapt the generated namespace to the transaction's port. */
-function portOf(remote: RemoteTerminalLike): TerminalPort {
+function portOf(remote: TerminalRemote): TerminalPort {
   return {
-    create: async (sid, request, signal) => valueOf(await remote.create(sid, request, signal)),
-    follow: (sid, id, attachmentId, signal) => remote.follow(sid, id, attachmentId, signal),
-    write: async (sid, id, attachmentId, data) => { valueOf(await remote.write(sid, id, attachmentId, data)) },
-    rename: async (sid, id, title) => { valueOf(await remote.rename(sid, id, title)) },
-    list: async sid => valueOf(await remote.list(sid)),
+    create: async (sid, request, signal) => valueOf(await remote.create(
+      sid as SessionId,
+      { id: request.id as WebTerminalId, cols: request.cols, rows: request.rows },
+      signal,
+    )),
+    // The duplex stream is already the port's attachment: downlink iterator plus uplink and dispose.
+    attach: (sid, id, signal) => remote.attach(sid as SessionId, id as WebTerminalId, signal),
+    rename: async (sid, id, title) => { valueOf(await remote.rename(sid as SessionId, id as WebTerminalId, title)) },
     close: async (sid, id) => {
-      const result = await remote.close(sid, id)
+      const result = await remote.close(sid as SessionId, id as WebTerminalId)
       // Already gone (the core close handler won the race): the goal is met.
       if (!result.ok && (result.error as { code?: string } | undefined)?.code === 'terminal/unavailable') return
       valueOf(result)
     },
   }
+}
+
+/**
+ * Refresh the Session's cached terminal list so a core `terminal` tab can open this id.
+ *
+ * A core view opened with `params.terminalId` reads that cache without refreshing it, and
+ * rejects an id it does not hold (`missingTerminal`), so it would never attach. `read(true)`
+ * joins a load that is already in flight, which may predate `create`; one further pass is
+ * then guaranteed fresh.
+ * @param terminals - the Session terminal inventory service.
+ * @param sessionId - the Session that will host the tab.
+ * @param terminalId - the terminal identity Connect allocated.
+ * @returns whether the identity is now listed.
+ */
+async function syncInventory(terminals: TerminalInventoryService, sessionId: string, terminalId: string): Promise<boolean> {
+  const id = terminalId as WebTerminalId
+  const listed = (infos: readonly { readonly id: WebTerminalId }[]): boolean => infos.some(info => info.id === id)
+  if (listed(await terminals.recover(sessionId as SessionId, true))) return true
+  return listed(await terminals.recover(sessionId as SessionId, true))
 }
 
 /** Record a per-machine recent connection, newest first, capped at 20. */
@@ -120,19 +158,17 @@ export function apply(ctx: ClientContext): void {
   installStyles(ctx)
 
   // Optional services: absent means Connect is disabled, nothing else.
-  let services: { remote: RemoteTerminalLike; sidebar: SidebarLike } | undefined
+  let services: { remote: TerminalRemote; terminals: TerminalInventoryService; sidebar: SidebarRight } | undefined
   const listeners = new Set<() => void>()
   const setServices = (next: typeof services): void => {
     services = next
     for (const fn of listeners) fn()
   }
   // `remote` must be listed with `remote.terminal`: the dotted name alone never resolves (same pair the core terminal plugin declares).
-  // The scoped fiber is owned by `ctx`: it unloads with the plugin and re-runs when either service changes.
-  const bind = ctx as unknown as { inject: (names: string[], cb: (c: unknown) => void) => unknown }
-  bind.inject(['remote', 'remote.terminal', 'sidebarRight'], (inner) => {
-    const c = inner as ClientContext & { remote: { terminal: RemoteTerminalLike }; sidebarRight: SidebarLike }
-    setServices({ remote: c.remote.terminal, sidebar: c.sidebarRight })
-    c.effect(() => () => { setServices(undefined) }, 'dsh-ssh-hosts: terminal services')
+  // The scoped fiber is owned by `ctx`: it unloads with the plugin and re-runs when any listed service changes.
+  ctx.inject(['remote', 'remote.terminal', 'webTerminals', 'sidebarRight'], (inner) => {
+    setServices({ remote: inner.remote.terminal, terminals: inner.webTerminals, sidebar: inner.sidebarRight })
+    inner.effect(() => () => { setServices(undefined) }, 'dsh-ssh-hosts: terminal services')
   })
 
   const available = {
@@ -150,12 +186,21 @@ export function apply(ctx: ClientContext): void {
       return (sessionId: string, hostId: string, signal: AbortSignal): Promise<ConnectOutcome> => connect({
         launch: (id, s) => api.launch(id, true, s),
         terminal: port,
-        openTab: (sid, terminalId) => { live.sidebar.openTabIn(sid, 'terminal', { params: { terminalId } }) },
+        syncInventory: (sid, terminalId) => syncInventory(live.terminals, sid, terminalId),
+        openTab: (sid, terminalId) => {
+          const openTerminalTab = live.sidebar.openTabIn as unknown as TerminalTabOpener
+          openTerminalTab(sid as SessionId, 'terminal', { params: { terminalId: terminalId as WebTerminalId } })
+        },
         closeTab: (sid, terminalId) => {
           try {
-            for (const tab of live.sidebar.tabsIn(sid)) {
+            for (const tab of live.sidebar.tabsIn(sid as SessionId)) {
               if (tab.kind !== 'terminal') continue
-              if (live.sidebar.tabDomain.occurrence(sid, { id: tab.id }).navigation.getSnapshot().params?.terminalId === terminalId) live.sidebar.closeIn(sid, tab.id)
+              // The tab kind's parameter map is unreachable here (see `TerminalTabOpener`), so the
+              // navigation parameters are read through the same restated union the core tab declares.
+              const params = live.sidebar.tabDomain.occurrence(sid as SessionId, { id: tab.id })
+                .navigation.getSnapshot().params as TerminalTabParams
+              if (params !== undefined && 'terminalId' in params
+                && params.terminalId === (terminalId as WebTerminalId)) live.sidebar.closeIn(sid as SessionId, tab.id)
             }
           } catch { /* best effort */ }
         },

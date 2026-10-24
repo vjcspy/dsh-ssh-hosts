@@ -1,21 +1,35 @@
 /**
  * One cancellable Connect transaction onto the core terminal.
  *
- * The sequence mirrors the core `TerminalView` (`create` -> `follow` -> `write`
- * -> `rename`), then hands the process to the core `terminal` tab by adopting
- * its id, and PROVES the adoption before declaring success:
- * `openTabIn` returns void and silently does nothing once a Session's sidebar
- * adoption is released, so returning is not evidence. The host sets
- * `controllerId` only when an attachment's `follow` runs, so a listed terminal
- * whose `controllerId` is defined and is not this transaction's own attachment
- * means a core view attached.
+ * On `dsh-v0.2.1-rc.2` the core terminal Remote exposes one duplex stream,
+ * `remote.terminal.attach(sessionId, id, signal)`: `TerminalFrame` values arrive
+ * through its async iterator and `TerminalInput` values leave through `send()`.
+ * Connect mirrors what a core terminal view does, then hands the process to the
+ * core `terminal` tab and PROVES the handover before declaring success:
+ *
+ * 1. `create` allocates the Host terminal.
+ * 2. `rename` runs before `attach`, so the first `snapshot` already carries the
+ *    final title and no follower receives a `state` frame this module caused.
+ * 3. `attach` takes input control and yields the first `snapshot`.
+ * 4. one `write` input carries the `exec ssh ...` line; its `ack` proves the Host
+ *    wrote it to the PTY, so releasing the attachment cannot drop it.
+ * 5. `syncInventory` refreshes the Session's cached terminal list: a core view
+ *    opened with `params.terminalId` rejects an id missing from that cache
+ *    (`missingTerminal`) and would never attach.
+ * 6. `openTab` opens the core `terminal` tab. Adoption is proven by a
+ *    `state{ writable: false }` frame on this still-open attachment, which the
+ *    Host broadcasts only when another attachment takes control of the input.
+ *
+ * A process that exits after the `ack` is not a failure: the tab is still opened
+ * so it shows the ssh error and exit banner. A process that exits or refuses the
+ * write before the `ack` is a failure and rolls back.
  *
  * Two lifetimes are kept apart. The OPERATION signal (`opSignal`) means "give up
- * and roll back". The FOLLOWER controller is a child of it: operation abort
- * aborts the follower, but the intentional release in step 7 aborts only the
- * follower. `assertLive()` runs after every awaited stage and before every
- * side effect that cannot be undone, so no continuation after an abort can open
- * a tab, disarm rollback or record recency.
+ * and roll back". The ATTACHMENT controller is a child of it: operation abort
+ * aborts the attachment, but the intentional release after the proven handover
+ * ends only that child. `assertLive()` runs after every awaited stage and before
+ * every side effect that cannot be undone, so no continuation after an abort can
+ * open a tab, disarm rollback or record recency.
  *
  * This module imports no React, no DOM and no host service: everything impure
  * arrives through {@link ConnectDeps}, so a script can drive it with stubs.
@@ -23,25 +37,34 @@
 import { TERMINAL_ID_PREFIX } from '../config.ts'
 import type { HostKeyReport, LaunchResult } from '../types.ts'
 
-/** A frame of the terminal follow stream, as far as this module reads it. */
-export interface FrameLike {
-  readonly type: string
-  readonly screen?: string
+/** Host terminal state, as far as this module reads it. */
+export type TerminalStateValue = 'running' | 'exited' | 'failed'
+
+/** A frame of the terminal attach stream, as far as this module reads it. */
+export type FrameLike =
+  | { readonly type: 'snapshot'; readonly screen: string; readonly info: { readonly state: TerminalStateValue }; readonly writable: boolean }
+  | { readonly type: 'output'; readonly data?: string | undefined }
+  | { readonly type: 'state'; readonly info: { readonly state: TerminalStateValue }; readonly writable: boolean }
+  | { readonly type: 'ack'; readonly sequence: number; readonly refusal?: 'read-only' | 'not-running' | undefined }
+
+/** The one command this transaction sends: the validated ssh line, first in sequence. */
+export interface TerminalWriteInput {
+  readonly type: 'write'
+  readonly sequence: number
+  readonly data: string
 }
 
-/** A listed terminal, as far as this module reads it. */
-export interface TerminalInfoLike {
-  readonly id: string
-  readonly controllerId?: string | undefined
+/** One open attach stream: the downlink iterator plus its uplink and cancellation. */
+export interface TerminalAttachment extends AsyncIterable<FrameLike> {
+  send(input: TerminalWriteInput): void
+  dispose(): void
 }
 
 /** The terminal operations this transaction uses. Ids are plain strings here. */
 export interface TerminalPort {
   create(sessionId: string, request: { id: string; cols: number; rows: number }, signal: AbortSignal): Promise<unknown>
-  follow(sessionId: string, id: string, attachmentId: string, signal: AbortSignal): AsyncIterable<FrameLike>
-  write(sessionId: string, id: string, attachmentId: string, data: string): Promise<void>
+  attach(sessionId: string, id: string, signal: AbortSignal): TerminalAttachment
   rename(sessionId: string, id: string, title: string): Promise<void>
-  list(sessionId: string): Promise<readonly TerminalInfoLike[]>
   close(sessionId: string, id: string): Promise<void>
 }
 
@@ -50,6 +73,11 @@ export interface ConnectDeps {
   /** `POST hosts/launch`, asking the Host half for the pre-flight host-key check. */
   launch(hostId: string, signal: AbortSignal): Promise<LaunchResult>
   readonly terminal: TerminalPort
+  /**
+   * Refresh the Session's cached terminal list so a core `terminal` tab can open
+   * this id; `true` when the id is listed, `false` when it is still missing.
+   */
+  syncInventory(sessionId: string, terminalId: string): Promise<boolean>
   /** `sidebarRight.openTabIn(sessionId, 'terminal', { params: { terminalId } })`; returns void and may silently do nothing. */
   openTab(sessionId: string, terminalId: string): void
   /** Close the core `terminal` tab bound to `terminalId`, if one exists; used only by rollback. Must not throw. */
@@ -66,17 +94,17 @@ export interface ConnectDeps {
 
 /** Timing knobs, in milliseconds. */
 export interface ConnectTimings {
-  /** Longest wait for the first prompt before writing anyway. */
+  /** Longest wait for the first prompt before writing anyway; fails when no snapshot arrived at all. */
   readonly readyMs: number
+  /** Longest wait for the Host to acknowledge the ssh line. */
+  readonly ackMs: number
   /** Adoption proof deadline after `openTabIn`. */
   readonly adoptMs: number
-  /** Adoption poll interval. */
-  readonly pollMs: number
   /** Rollback `close` deadline. */
   readonly closeMs: number
 }
 
-const DEFAULT_TIMINGS: ConnectTimings = { readyMs: 3000, adoptMs: 5000, pollMs: 250, closeMs: 5000 }
+const DEFAULT_TIMINGS: ConnectTimings = { readyMs: 3000, ackMs: 5000, adoptMs: 5000, closeMs: 5000 }
 
 /** How a transaction ended. */
 export type ConnectOutcome =
@@ -122,11 +150,15 @@ export async function connect(
   let armed = false
   let tabOpened = false
   let followCtl: AbortController | undefined
+  let attachHandle: TerminalAttachment | undefined
   let loop: Promise<void> | undefined
+  let released = false
 
-  /** Abort `followCtl` and wait for its consumer loop to end. */
+  /** End the attachment on purpose, then wait for its consumer loop to settle. */
   const releaseFollower = async (): Promise<void> => {
+    released = true
     followCtl?.abort()
+    attachHandle?.dispose()
     await loop
   }
 
@@ -159,71 +191,126 @@ export async function connect(
     assertLive()
 
     const id = `${TERMINAL_ID_PREFIX}${deps.newId()}`
-    const attachmentId = deps.newId()
     terminalId = id
     // Armed as soon as `create` is issued: a create that resolves after an abort is still closed.
     armed = true
     await deps.terminal.create(sessionId, { id, cols: 80, rows: 24 }, opSignal)
     assertLive()
 
+    // Before attach: no follower exists, so this cannot emit a `state` frame, and both the
+    // first snapshot and the inventory refresh below already carry the final title.
+    await deps.terminal.rename(sessionId, id, launch.title)
+    assertLive()
+
     const follow = new AbortController()
     followCtl = follow
     opSignal.addEventListener('abort', () => { follow.abort() }, { once: true })
-    let followError: unknown
+    const attachment = deps.terminal.attach(sessionId, id, follow.signal)
+    attachHandle = attachment
+
     let sawSnapshot = false
     let sawOutput = false
     let screenReady = false
-    let wake: (() => void) | undefined
-    const ready = new Promise<void>((resolveReady) => { wake = resolveReady })
+    let acked = false
+    let adopted = false
+    let lastState: TerminalStateValue = 'running'
+    let followError: unknown
+    const waiters = new Set<() => void>()
+    const notify = (): void => {
+      const pending = [...waiters]
+      waiters.clear()
+      for (const wake of pending) wake()
+    }
+    const waitChange = (): Promise<void> => new Promise<void>((resolve) => { waiters.add(resolve) })
+    /** Wait for a stage predicate, waking early on any recorded failure or abort. */
+    const waitFor = async (predicate: () => boolean, ms: number): Promise<void> => {
+      if (predicate() || followError !== undefined) return
+      const guard = new AbortController()
+      const onAbort = (): void => { guard.abort(); notify() }
+      opSignal.addEventListener('abort', onAbort, { once: true })
+      const timer = deps.sleep(ms, guard.signal)
+      timer.catch(() => undefined)
+      // On the deadline the wait must end, not re-arm: abort the guard, then wake the loop.
+      void timer.then(() => { guard.abort(); notify() }, () => { notify() })
+      try {
+        while (!predicate() && followError === undefined && !guard.signal.aborted) await waitChange()
+      } finally {
+        guard.abort()
+        opSignal.removeEventListener('abort', onAbort)
+        waiters.clear()
+      }
+    }
+
     loop = (async () => {
       try {
-        for await (const frame of deps.terminal.follow(sessionId, id, attachmentId, follow.signal)) {
-          if (frame.type === 'snapshot') { sawSnapshot = true; screenReady = hasPrintable(frame.screen) }
-          else if (frame.type === 'output') sawOutput = true
-          if (sawSnapshot && (sawOutput || screenReady)) wake?.()
+        for await (const frame of attachment) {
+          if (frame.type === 'snapshot') {
+            lastState = frame.info.state
+            if (!frame.writable || frame.info.state !== 'running') {
+              if (followError === undefined) followError = new Error('terminal is not writable')
+            } else {
+              sawSnapshot = true
+              screenReady = hasPrintable(frame.screen)
+            }
+          } else if (frame.type === 'output') {
+            sawOutput = true
+          } else if (frame.type === 'ack') {
+            if (frame.refusal !== undefined) {
+              if (followError === undefined) followError = new Error(`terminal write refused (${frame.refusal})`)
+            } else if (frame.sequence === 1) {
+              acked = true
+            }
+          } else {
+            const previous = lastState
+            lastState = frame.info.state
+            if (previous === 'running' && frame.info.state !== 'running') {
+              // The single running -> exited|failed transition of this process.
+              if (!acked && followError === undefined) {
+                followError = new Error(`terminal ${frame.info.state} before the write settled`)
+              }
+            } else if (sawSnapshot && !frame.writable) {
+              // Only another attachment taking control broadcasts this with the process alive.
+              if (tabOpened) adopted = true
+              else if (followError === undefined) followError = new Error('terminal control was lost before the tab opened')
+            }
+          }
+          notify()
+        }
+        if (!follow.signal.aborted && !released && followError === undefined) {
+          followError = new Error('terminal attachment ended')
         }
       } catch (error) {
-        if (!follow.signal.aborted) { followError = error; wake?.() }
+        if (!follow.signal.aborted && !released && followError === undefined) followError = error
+      } finally {
+        notify()
       }
     })()
 
     // The first prompt: the snapshot plus the first output (or an already-drawn screen), at most `readyMs`.
-    const waitCtl = new AbortController()
-    opSignal.addEventListener('abort', () => { waitCtl.abort() }, { once: true })
-    const timer = deps.sleep(timings.readyMs, waitCtl.signal)
-    timer.catch(() => undefined)
-    try {
-      await Promise.race([ready, timer])
-    } finally {
-      waitCtl.abort()
-    }
+    await waitFor(() => sawSnapshot && (sawOutput || screenReady), timings.readyMs)
     assertLive()
     if (followError !== undefined) throw followError
+    if (!sawSnapshot) throw new Error('terminal did not send the initial screen in time')
 
-    await deps.terminal.write(sessionId, id, attachmentId, launch.line)
+    attachment.send({ type: 'write', sequence: 1, data: launch.line })
+    await waitFor(() => acked, timings.ackMs)
     assertLive()
-    await deps.terminal.rename(sessionId, id, launch.title)
-    assertLive()
+    if (followError !== undefined) throw followError
+    if (!acked) throw new Error('the terminal did not acknowledge the ssh command in time')
 
-    // Intentional release: only the follower ends; the operation goes on.
-    follow.abort()
-    await loop
+    assertLive()
+    if (!await deps.syncInventory(sessionId, id)) throw new Error('the terminal was not listed in the Session inventory')
     assertLive()
 
     tabOpened = true
     deps.openTab(sessionId, id)
 
-    const deadline = deps.now() + timings.adoptMs
-    for (;;) {
-      assertLive()
-      const listed = await deps.terminal.list(sessionId)
-      assertLive()
-      const info = listed.find(item => item.id === id)
-      if (info?.controllerId !== undefined && info.controllerId !== attachmentId) break
-      if (deps.now() >= deadline) throw new Error('the terminal tab did not attach in time')
-      await deps.sleep(timings.pollMs, opSignal)
-    }
+    await waitFor(() => adopted, timings.adoptMs)
+    assertLive()
+    if (followError !== undefined) throw followError
+    if (!adopted) throw new Error('the terminal tab did not attach in time')
 
+    await releaseFollower()
     assertLive()
     armed = false
     deps.recordRecent(hostId, deps.now())

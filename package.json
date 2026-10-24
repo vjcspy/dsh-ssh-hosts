@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-hosts",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DSH Web plugin: a Termius-like SSH host manager in the right sidebar. Hosts live in a git-tracked YAML file; Connect opens a core terminal tab running ssh.",
   "license": "MIT",
   "type": "module",
